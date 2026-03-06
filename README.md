@@ -1,1 +1,0 @@
-# lectnotes-ocr
