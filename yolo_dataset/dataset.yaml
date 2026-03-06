@@ -1,0 +1,8 @@
+names:
+- formula
+- picture
+- text
+nc: 3
+path: /home/user/project/yolo_dataset
+train: images/train
+val: images/val
