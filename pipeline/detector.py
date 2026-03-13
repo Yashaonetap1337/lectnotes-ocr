@@ -16,7 +16,7 @@ from config import YOLO_MODEL, YOLO_IMG_SIZE, YOLO_CONF, CLASS_NAMES
 @dataclass
 class DetectedRegion:
     label:      str
-    bbox:       tuple       # (x0, y0, x1, y1) в пикселях
+    bbox:       tuple
     confidence: float
     page_idx:   int
 

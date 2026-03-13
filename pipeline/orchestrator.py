@@ -93,7 +93,7 @@ class OCRPipeline:
             rendered_pages.append(rendered)
             page_markdowns.append(md)
 
-            cleanup_crops(idx)
+            # cleanup_crops(idx)  # отключено для отладки — кропы остаются в tmp/crops/
 
         # Шаг 6 — сборка документа
         _progress(total, total, "Сборка документа...")
