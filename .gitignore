@@ -1,1 +1,4 @@
 __pycache__
+data/
+fix_19_38/
+models/trocr_finetuned/

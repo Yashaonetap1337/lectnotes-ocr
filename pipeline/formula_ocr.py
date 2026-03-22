@@ -1,14 +1,13 @@
 """
 pipeline/formula_ocr.py
-Шаг 4b: заглушка для распознавания формул.
-Модель будет подключена позже (GOT-OCR 2.0 или другая).
+Шаг 4b: формулы не распознаются — кроп вставляется как изображение.
 """
 from pathlib import Path
 from typing import List
 
 
 def load_formula_model():
-    """Заглушка. Вернёт None пока модель не подключена."""
+    """Модель не нужна — возвращаем None."""
     return None
 
 
@@ -17,7 +16,7 @@ def recognize_formula_regions(
     crop_paths: List[Path],
 ) -> List[str]:
     """
-    Заглушка: возвращает placeholder LaTeX для каждого формульного региона.
-    Заменить на реальный OCR когда модель будет выбрана.
+    Возвращает пути к кропам формул как строки.
+    aggregator.py вставит их как изображения.
     """
-    return [f"$$[FORMULA_{i}]$$" for i in range(len(crop_paths))]
+    return [str(p) for p in crop_paths]

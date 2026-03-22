@@ -1,14 +1,9 @@
 """
 pipeline/aggregator.py
-Шаг 5: сборка результатов страницы → рендер PNG + Markdown.
+Шаг 5: рендер страницы с сохранением оригинального расположения регионов.
 
-Логика рендера:
-- Берём all_regions (отсортированы сверху вниз по y0)
-- text    → параграф текста
-- formula → блок $$ latex $$
-- picture → вставка оригинального кропа
-- Рендерим всё на белый холст через PIL → PNG страницы
-- Параллельно собираем Markdown
+Каждый элемент рисуется по координатам bbox из YOLO детекции —
+текст/формула вписывается в bbox, картинка масштабируется в bbox.
 """
 import base64
 import textwrap
@@ -18,18 +13,24 @@ from typing import Dict, List, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 from config import TARGET_WIDTH, TARGET_HEIGHT, PICTURE_EMBED
-from pipeline.detector import PageDetections
+from pipeline.detector import PageDetections, DetectedRegion
 
 
 # ── Константы рендера ─────────────────────────────────────────────────────────
-FONT_SIZE_TEXT    = 20
-FONT_SIZE_FORMULA = 18
-LINE_HEIGHT       = 28
-MARGIN_X          = 60
-MARGIN_Y          = 60
+FONT_SIZE_TEXT    = 18
+FONT_SIZE_FORMULA = 16
+LINE_HEIGHT       = 22
 TEXT_COLOR        = (20, 20, 20)
 FORMULA_COLOR     = (10, 60, 160)
-MAX_TEXT_WIDTH    = TARGET_WIDTH - MARGIN_X * 2
+BG_COLOR          = (255, 255, 255)
+
+# Полупрозрачные рамки для отладки (False = без рамок в продакшене)
+DEBUG_BOXES       = False
+DEBUG_COLORS = {
+    "text":    (33,  150, 243),
+    "formula": (255, 87,  34),
+    "picture": (76,  175, 80),
+}
 
 
 def aggregate_page(
@@ -40,62 +41,55 @@ def aggregate_page(
     crop_paths:      Dict[str, List[Path]],
 ) -> Tuple[Image.Image, str]:
     """
-    Рендерит страницу и собирает Markdown.
-
-    Args:
-        page_idx:        номер страницы (0-based)
-        detections:      PageDetections с регионами
-        text_results:    {region_idx: текст}    для texts
-        formula_results: {region_idx: LaTeX}    для formulas
-        crop_paths:      {"picture": [path...]} для картинок
+    Рендерит страницу: каждый регион рисуется по своим bbox координатам.
 
     Returns:
         (PIL.Image rendered page, markdown string)
     """
-    canvas = Image.new("RGB", (TARGET_WIDTH, TARGET_HEIGHT), (255, 255, 255))
+    canvas = Image.new("RGB", (TARGET_WIDTH, TARGET_HEIGHT), BG_COLOR)
     draw   = ImageDraw.Draw(canvas)
 
-    try:
-        font_text    = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",    FONT_SIZE_TEXT)
-        font_formula = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", FONT_SIZE_FORMULA)
-    except Exception:
-        font_text    = ImageFont.load_default()
-        font_formula = ImageFont.load_default()
-
-    md_lines: List[str] = [f"\n\n---\n\n## Страница {page_idx + 1}\n"]
-    cursor_y = MARGIN_Y
+    font_text, font_formula = _load_fonts()
+    md_lines = [f"\n\n---\n\n## Страница {page_idx + 1}\n"]
 
     # Счётчики для индексации результатов
     text_idx    = 0
     formula_idx = 0
     picture_idx = 0
 
+    # Рендерим в порядке сверху вниз (all_regions уже отсортированы по y0)
     for region in detections.all_regions:
+        x0, y0, x1, y1 = region.bbox
+        bbox_w = x1 - x0
+        bbox_h = y1 - y0
+
+        # Отладочные рамки
+        if DEBUG_BOXES:
+            color = DEBUG_COLORS.get(region.label, (200, 200, 200))
+            draw.rectangle([x0, y0, x1, y1],
+                           outline=color, width=2)
 
         if region.label == "text":
-            content = text_results.get(text_idx, "[TEXT]")
+            content = text_results.get(text_idx, "")
             text_idx += 1
-            cursor_y = _render_text(draw, content, cursor_y, font_text)
-            md_lines.append(content + "\n")
+            if content:
+                _render_text_in_bbox(draw, content, x0, y0, bbox_w, bbox_h, font_text)
+                md_lines.append(content + "\n")
 
         elif region.label == "formula":
-            content = formula_results.get(formula_idx, "$$[FORMULA]$$")
+            img_path = formula_results.get(formula_idx, "")
             formula_idx += 1
-            cursor_y = _render_formula(draw, content, cursor_y, font_formula)
-            md_lines.append(f"\n{content}\n")
+            if img_path and Path(img_path).exists():
+                _render_picture_in_bbox(canvas, Path(img_path), x0, y0, bbox_w, bbox_h)
+                md_lines.append(_md_image(Path(img_path), f"formula_{formula_idx}"))
 
         elif region.label == "picture":
             paths = crop_paths.get("picture", [])
             if picture_idx < len(paths):
                 img_path = paths[picture_idx]
-                cursor_y = _render_picture(canvas, img_path, cursor_y)
-                md_lines.append(_md_image(img_path, picture_idx))
+                _render_picture_in_bbox(canvas, img_path, x0, y0, bbox_w, bbox_h)
+                md_lines.append(_md_image(img_path, f"picture_{picture_idx}"))
             picture_idx += 1
-
-        cursor_y += 10  # отступ между блоками
-
-        if cursor_y > TARGET_HEIGHT - MARGIN_Y:
-            break  # страница заполнена
 
     return canvas, "\n".join(md_lines)
 
@@ -104,53 +98,97 @@ def aggregate_document(
     rendered_pages: List[Image.Image],
     page_markdowns: List[str],
 ) -> Tuple[List[Image.Image], str]:
-    """
-    Возвращает список страниц и полный Markdown документа.
-    """
     full_md = "# Оцифрованный документ\n" + "\n".join(page_markdowns)
     return rendered_pages, full_md
 
 
-# ── Вспомогательные функции рендера ──────────────────────────────────────────
+# ── Рендер по bbox ────────────────────────────────────────────────────────────
 
-def _render_text(draw: ImageDraw.Draw, text: str, y: int, font) -> int:
-    """Рисует текст с переносом строк. Возвращает новый y."""
-    chars_per_line = MAX_TEXT_WIDTH // (FONT_SIZE_TEXT // 2 + 2)
+def _render_text_in_bbox(
+    draw: ImageDraw.Draw,
+    text: str,
+    x0: int, y0: int,
+    bbox_w: int, bbox_h: int,
+    font,
+) -> None:
+    """Вписывает текст в bbox с автопереносом строк."""
+    # Оцениваем сколько символов влезает по ширине
+    char_w = max(1, FONT_SIZE_TEXT // 2 + 1)
+    chars_per_line = max(1, bbox_w // char_w)
+
     lines = []
     for paragraph in text.split("\n"):
-        lines += textwrap.wrap(paragraph, width=chars_per_line) or [""]
+        wrapped = textwrap.wrap(paragraph, width=chars_per_line)
+        lines += wrapped if wrapped else [""]
 
+    y = y0
     for line in lines:
-        draw.text((MARGIN_X, y), line, font=font, fill=TEXT_COLOR)
+        if y + LINE_HEIGHT > y0 + bbox_h:
+            break
+        draw.text((x0, y), line, font=font, fill=TEXT_COLOR)
         y += LINE_HEIGHT
-    return y
 
 
-def _render_formula(draw: ImageDraw.Draw, latex: str, y: int, font) -> int:
-    """Рисует формулу как текст (LaTeX строку). Возвращает новый y."""
-    # Убираем обёртку $$
+def _render_formula_in_bbox(
+    draw: ImageDraw.Draw,
+    latex: str,
+    x0: int, y0: int,
+    bbox_w: int,
+    font,
+) -> None:
+    """Рисует LaTeX строку формулы в bbox."""
     clean = latex.strip().strip("$").strip()
-    draw.text((MARGIN_X, y), f"  {clean}", font=font, fill=FORMULA_COLOR)
-    return y + LINE_HEIGHT + 4
+    # Усекаем если не влезает
+    max_chars = max(1, bbox_w // (FONT_SIZE_FORMULA // 2 + 1))
+    if len(clean) > max_chars:
+        clean = clean[:max_chars - 1] + "…"
+    draw.text((x0, y0), clean, font=font, fill=FORMULA_COLOR)
 
 
-def _render_picture(canvas: Image.Image, img_path: Path, y: int) -> int:
-    """Вставляет кроп картинки на холст. Возвращает новый y."""
+def _render_picture_in_bbox(
+    canvas: Image.Image,
+    img_path: Path,
+    x0: int, y0: int,
+    bbox_w: int, bbox_h: int,
+) -> None:
+    """Масштабирует кроп картинки и вставляет точно в bbox."""
     try:
         pic = Image.open(img_path).convert("RGB")
-        max_w = TARGET_WIDTH - MARGIN_X * 2
-        if pic.width > max_w:
-            ratio = max_w / pic.width
-            pic = pic.resize((max_w, int(pic.height * ratio)), Image.LANCZOS)
-        canvas.paste(pic, (MARGIN_X, y))
-        return y + pic.height
-    except Exception:
-        return y + 10
+        # Масштабируем с сохранением пропорций в пределах bbox
+        pic.thumbnail((bbox_w, bbox_h), Image.LANCZOS)
+        canvas.paste(pic, (x0, y0))
+    except Exception as e:
+        print(f"[Aggregator] Ошибка вставки картинки {img_path}: {e}")
 
 
-def _md_image(img_path: Path, idx: int) -> str:
-    """Возвращает Markdown строку с изображением."""
+# ── Вспомогательные ───────────────────────────────────────────────────────────
+
+def _load_fonts():
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    font_text = font_formula = None
+    for path in font_paths:
+        try:
+            font_text    = ImageFont.truetype(path, FONT_SIZE_TEXT)
+            font_formula = ImageFont.truetype(path, FONT_SIZE_FORMULA)
+            break
+        except Exception:
+            continue
+    if font_text is None:
+        font_text    = ImageFont.load_default()
+        font_formula = ImageFont.load_default()
+    return font_text, font_formula
+
+
+def _md_image(img_path: Path, label: str = None) -> str:
+    tag = label or img_path.stem
     if PICTURE_EMBED:
-        data = base64.b64encode(img_path.read_bytes()).decode()
-        return f"\n![picture_{idx}](data:image/png;base64,{data})\n"
-    return f"\n![picture_{idx}]({img_path})\n"
+        try:
+            data = base64.b64encode(img_path.read_bytes()).decode()
+            return f"\n![{tag}](data:image/png;base64,{data})\n"
+        except Exception:
+            pass
+    return f"\n![{tag}]({img_path})\n"
